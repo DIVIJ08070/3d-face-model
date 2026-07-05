@@ -1,0 +1,1069 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FaceForge 3D — Scan your face into a 3D model, in your browser</title>
+
+<!-- Three.js (ES modules) + addons, resolved via importmap. Delaunator is imported inside the module. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<style>
+/* ============================================================= *
+ *  DESIGN TOKENS  (from features/faceforge-3d/DESIGN_SPEC.md)   *
+ * ============================================================= */
+:root{
+  --bg:#0b0e14; --surface:#141925; --surface-2:#1c2334; --border:#263041;
+  --text:#e8ecf4; --text-dim:#97a1b5;
+  --accent:#6ea8fe; --accent-strong:#4f8cff;
+  --good:#34d399; --warn:#f59e0b; --bad:#f43f5e;
+  --radius:16px; --radius-sm:10px;
+  --shadow:0 10px 30px rgba(0,0,0,.45);
+  --font:ui-sans-serif,system-ui,"Segoe UI",Roboto,Inter,Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text); font-family:var(--font);
+  font-size:15px; line-height:1.5; -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+h1,h2,h3{margin:0 0 .4em; line-height:1.2}
+button{font-family:inherit; font-size:15px; cursor:pointer}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:6px}
+.hidden{display:none !important}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+/* ---- buttons ---- */
+.btn{
+  border:1px solid var(--border); background:var(--surface-2); color:var(--text);
+  padding:12px 18px; border-radius:var(--radius-sm); min-height:44px;
+  display:inline-flex; align-items:center; gap:8px; justify-content:center;
+  transition:transform .12s ease, background .15s ease, opacity .15s ease, border-color .15s;
+}
+.btn:hover{background:#222b3e}
+.btn:active{transform:scale(.98)}
+.btn[disabled]{opacity:.4; pointer-events:none}
+.btn.primary{background:var(--accent); border-color:transparent; color:#08101f; font-weight:700}
+.btn.primary:hover{background:var(--accent-strong)}
+.btn.ghost{background:transparent}
+.btn.big{padding:15px 26px; font-size:17px; min-height:52px}
+.btn.block{width:100%}
+
+/* ---- screens ---- */
+.screen{display:none; min-height:100dvh; padding:24px; animation:fade .25s ease}
+.screen.active{display:flex}
+@keyframes fade{from{opacity:0; transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* ============================================================= *
+ *  LANDING                                                       *
+ * ============================================================= */
+#landing{flex-direction:column; align-items:center; justify-content:center; text-align:center}
+.wrap{width:100%; max-width:720px}
+.brand{
+  font-size:clamp(30px,6vw,46px); font-weight:800; letter-spacing:-.02em;
+  background:linear-gradient(90deg,#9ec5ff,#6ea8fe 60%,#c9a3ff);
+  -webkit-background-clip:text; background-clip:text; color:transparent; margin-bottom:6px;
+}
+.tagline{color:var(--text-dim); font-size:clamp(15px,2.5vw,18px); margin-bottom:28px}
+.steps3{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:8px 0 26px}
+.stepcard{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:18px 12px}
+.stepcard .ico{font-size:26px}
+.stepcard .n{color:var(--accent); font-weight:700; font-size:13px; margin-top:6px}
+.stepcard .t{color:var(--text-dim); font-size:13px}
+.privacy{
+  margin-top:22px; display:inline-flex; gap:8px; align-items:center;
+  background:var(--surface); border:1px solid var(--border); color:var(--text-dim);
+  padding:10px 16px; border-radius:999px; font-size:13px;
+}
+.notice{margin-top:16px; color:var(--warn); font-size:13px; max-width:560px}
+
+/* ============================================================= *
+ *  CAPTURE                                                       *
+ * ============================================================= */
+#capture{flex-direction:column; align-items:center}
+.cap-head{width:100%; max-width:640px; margin-bottom:14px}
+.progress-row{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px}
+.progress-row .label{font-size:13px; color:var(--text-dim); font-weight:600}
+.segbar{display:flex; gap:6px; flex:1; margin-left:14px}
+.seg{height:6px; flex:1; border-radius:999px; background:var(--surface-2)}
+.seg.done{background:var(--good)}
+.seg.current{background:var(--accent)}
+
+.stage{
+  position:relative; width:100%; max-width:640px; aspect-ratio:4/3;
+  background:#000; border-radius:var(--radius); overflow:hidden;
+  border:2px solid var(--border); box-shadow:var(--shadow);
+}
+@media(max-width:600px){ .stage{aspect-ratio:3/4} }
+#video{width:100%; height:100%; object-fit:cover; transform:scaleX(-1)} /* mirror for selfie feel */
+/* oval face-outline overlay */
+.oval-svg{position:absolute; inset:0; width:100%; height:100%; pointer-events:none}
+.oval{fill:none; stroke:var(--warn); stroke-width:3; transition:stroke .2s ease, filter .2s ease;
+      filter:drop-shadow(0 0 6px rgba(245,158,11,.5))}
+.stage.aligned .oval{stroke:var(--good); filter:drop-shadow(0 0 14px rgba(52,211,153,.7))}
+.flash{position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none}
+.flash.go{animation:flash .35s ease}
+@keyframes flash{0%{opacity:0}10%{opacity:.9}100%{opacity:0}}
+
+/* alignment chip + countdown */
+.chip{
+  position:absolute; top:12px; left:50%; transform:translateX(-50%);
+  background:rgba(10,14,22,.72); backdrop-filter:blur(6px); border:1px solid var(--border);
+  padding:8px 14px; border-radius:999px; font-size:13px; font-weight:600; white-space:nowrap;
+  display:flex; align-items:center; gap:8px;
+}
+.chip.good{color:var(--good); border-color:rgba(52,211,153,.5)}
+.chip.warn{color:var(--warn); border-color:rgba(245,158,11,.5)}
+.countdown{
+  position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+  font-size:96px; font-weight:800; color:#fff; text-shadow:0 4px 24px rgba(0,0,0,.6);
+}
+.countdown.show{display:flex}
+
+/* angle gauge */
+.gauge{position:absolute; left:12px; bottom:12px; width:120px; height:64px;
+       background:rgba(10,14,22,.66); border:1px solid var(--border); border-radius:12px; padding:6px}
+.gauge svg{width:100%; height:100%; overflow:visible}
+.gauge .track{fill:none; stroke:var(--surface-2); stroke-width:6; stroke-linecap:round}
+.gauge .zone{fill:none; stroke:var(--good); stroke-width:6; stroke-linecap:round; opacity:.85}
+.gauge .needle{stroke:var(--accent); stroke-width:3; stroke-linecap:round; transition:transform .08s linear;
+               transform-origin:50px 50px}
+.gauge .cap{fill:var(--accent)}
+
+/* warnings (dark, small face, etc.) */
+.warnbar{
+  position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+  background:rgba(244,63,94,.14); border:1px solid rgba(244,63,94,.5); color:#ffb4c0;
+  padding:8px 14px; border-radius:10px; font-size:13px; max-width:90%; text-align:center;
+}
+.hintbar{
+  position:absolute; top:52px; left:50%; transform:translateX(-50%);
+  background:rgba(10,14,22,.8); border:1px solid var(--border); color:var(--text-dim);
+  padding:8px 14px; border-radius:10px; font-size:13px; text-align:center;
+}
+
+.instruction{max-width:640px; text-align:center; font-size:18px; margin:16px 0 10px}
+.cap-controls{display:flex; gap:10px; flex-wrap:wrap; justify-content:center; align-items:center}
+.softlink{background:none; border:none; color:var(--text-dim); text-decoration:underline; font-size:13px; min-height:auto; padding:4px}
+.thumbs{display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; justify-content:center}
+.thumb{position:relative; width:88px}
+.thumb .frame{width:88px; height:88px; border-radius:12px; overflow:hidden; border:1px solid var(--border); background:var(--surface-2); display:flex; align-items:center; justify-content:center}
+.thumb .frame img{width:100%; height:100%; object-fit:cover}
+.thumb .frame.empty{color:var(--text-dim); font-size:11px}
+.thumb .cap-label{font-size:11px; color:var(--text-dim); text-align:center; margin-top:4px}
+.thumb .retake{position:absolute; top:-6px; right:-6px; background:var(--surface); border:1px solid var(--border); border-radius:999px; width:26px; height:26px; font-size:12px; min-height:auto; padding:0}
+
+/* ============================================================= *
+ *  REVIEW / PROCESSING                                           *
+ * ============================================================= */
+#review,#processing{flex-direction:column; align-items:center; justify-content:center; text-align:center}
+.review-thumbs{display:flex; gap:16px; flex-wrap:wrap; justify-content:center; margin:20px 0}
+.review-thumbs .thumb{width:150px}
+.review-thumbs .frame{width:150px; height:150px}
+.spinner{width:56px; height:56px; border-radius:50%; border:5px solid var(--surface-2); border-top-color:var(--accent); animation:spin 1s linear infinite; margin:0 auto 20px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.proc-status{color:var(--text-dim); min-height:1.5em}
+.pbar{width:260px; height:6px; border-radius:999px; background:var(--surface-2); overflow:hidden; margin:18px auto 0}
+.pbar::before{content:""; display:block; height:100%; width:40%; background:var(--accent); border-radius:999px; animation:indet 1.2s ease-in-out infinite}
+@keyframes indet{0%{margin-left:-40%}100%{margin-left:100%}}
+
+/* ============================================================= *
+ *  RESULT / VIEWER                                               *
+ * ============================================================= */
+#result{flex-direction:column; padding:0}
+.viewer-stage{position:relative; flex:1; width:100%; min-height:60vh; background:radial-gradient(120% 120% at 50% 0%, #1a2233 0%, #0b0e14 70%)}
+#viewer-canvas{display:block; width:100%; height:100%}
+.toolbar{
+  position:absolute; top:16px; right:16px; display:flex; flex-direction:column; gap:8px;
+  background:rgba(20,25,37,.72); backdrop-filter:blur(8px); border:1px solid var(--border);
+  border-radius:14px; padding:10px; box-shadow:var(--shadow);
+}
+.toolbar .tbtn{display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:150px;
+               background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+               padding:8px 12px; border-radius:8px; font-size:13px; min-height:40px}
+.toolbar .tbtn.on{border-color:var(--accent); color:var(--accent)}
+.toolbar .tbtn input[type=color]{width:26px; height:26px; border:none; background:none; padding:0; cursor:pointer}
+.stats{position:absolute; left:16px; bottom:16px; background:rgba(10,14,22,.7); border:1px solid var(--border);
+        border-radius:10px; padding:8px 12px; font-size:13px; color:var(--text-dim)}
+.actionbar{display:flex; gap:10px; flex-wrap:wrap; justify-content:center; align-items:center;
+           padding:16px; background:var(--surface); border-top:1px solid var(--border)}
+
+/* ============================================================= *
+ *  ERROR OVERLAY + TOASTS                                        *
+ * ============================================================= */
+.overlay{position:fixed; inset:0; z-index:50; display:none; align-items:center; justify-content:center;
+         background:rgba(6,8,13,.82); padding:24px}
+.overlay.show{display:flex}
+.overlay .card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+               padding:28px; max-width:440px; text-align:center; box-shadow:var(--shadow)}
+.overlay .ico{font-size:40px; margin-bottom:8px}
+.overlay p{color:var(--text-dim); margin:8px 0 18px}
+#toasts{position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:60;
+        display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none}
+.toast{background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+       padding:10px 16px; border-radius:10px; font-size:14px; box-shadow:var(--shadow);
+       animation:toastin .2s ease}
+.toast.good{border-color:rgba(52,211,153,.5)}
+.toast.bad{border-color:rgba(244,63,94,.5)}
+@keyframes toastin{from{opacity:0; transform:translateY(8px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+
+<!-- ================= LANDING ================= -->
+<section id="landing" class="screen active">
+  <div class="wrap">
+    <h1 class="brand">FaceForge&nbsp;3D</h1>
+    <p class="tagline">Scan your face from three angles and turn it into an interactive 3D model — entirely in your browser.</p>
+    <div class="steps3">
+      <div class="stepcard"><div class="ico">😐</div><div class="n">STEP 1</div><div class="t">Front</div></div>
+      <div class="stepcard"><div class="ico">😑</div><div class="n">STEP 2</div><div class="t">Left profile</div></div>
+      <div class="stepcard"><div class="ico">😏</div><div class="n">STEP 3</div><div class="t">Right profile</div></div>
+    </div>
+    <button id="start-btn" class="btn primary big">Start Scan →</button>
+    <div class="privacy">🔒 All processing happens in your browser. Your photos never leave your device.</div>
+    <div id="secure-notice" class="notice hidden">⚠ Camera access needs a secure context. Open this page over <b>https://</b> or <b>http://localhost</b>.</div>
+  </div>
+</section>
+
+<!-- ================= CAPTURE ================= -->
+<section id="capture" class="screen">
+  <div class="cap-head">
+    <div class="progress-row">
+      <span class="label" id="step-label">Step 1 of 3</span>
+      <div class="segbar" id="segbar">
+        <span class="seg current"></span><span class="seg"></span><span class="seg"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage" id="stage">
+    <video id="video" playsinline autoplay muted></video>
+    <svg class="oval-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <ellipse class="oval" cx="50" cy="50" rx="27" ry="38"></ellipse>
+    </svg>
+    <div class="chip warn" id="align-chip">Getting ready…</div>
+    <div class="countdown" id="countdown"></div>
+    <div class="hintbar hidden" id="hintbar">Make sure your face is visible and well lit</div>
+    <div class="warnbar hidden" id="warnbar"></div>
+    <div class="gauge">
+      <svg viewBox="0 0 100 56">
+        <!-- semicircle track from 180° to 0° -->
+        <path class="track" d="M 8 50 A 42 42 0 0 1 92 50"></path>
+        <path class="zone" id="gauge-zone" d=""></path>
+        <line class="needle" id="gauge-needle" x1="50" y1="50" x2="50" y2="12"></line>
+        <circle class="cap" cx="50" cy="50" r="4"></circle>
+      </svg>
+    </div>
+    <div class="flash" id="flash"></div>
+  </div>
+
+  <p class="instruction" id="instruction" aria-live="polite">Look straight at the camera and keep your face inside the oval.</p>
+
+  <div class="cap-controls">
+    <button id="capture-btn" class="btn primary" disabled>Capture</button>
+    <button id="cap-restart" class="btn ghost">Start over</button>
+  </div>
+  <button id="force-capture" class="softlink hidden">Having trouble aligning? Capture anyway</button>
+
+  <div class="thumbs" id="thumbs">
+    <div class="thumb" data-angle="front"><div class="frame empty">Front</div><div class="cap-label">Front</div></div>
+    <div class="thumb" data-angle="left"><div class="frame empty">Left</div><div class="cap-label">Left</div></div>
+    <div class="thumb" data-angle="right"><div class="frame empty">Right</div><div class="cap-label">Right</div></div>
+  </div>
+</section>
+
+<!-- ================= REVIEW ================= -->
+<section id="review" class="screen">
+  <div class="wrap">
+    <h2>Review your captures</h2>
+    <p class="tagline">Happy with all three? Build your 3D model. You can retake any angle.</p>
+    <div class="review-thumbs" id="review-thumbs"></div>
+    <div class="cap-controls">
+      <button id="build-btn" class="btn primary big">Build 3D model →</button>
+      <button id="review-restart" class="btn ghost">Start over</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= PROCESSING ================= -->
+<section id="processing" class="screen">
+  <div class="wrap">
+    <div class="spinner"></div>
+    <h2>Reconstructing your face in 3D…</h2>
+    <p class="proc-status" id="proc-status">Detecting landmarks…</p>
+    <div class="pbar"></div>
+  </div>
+</section>
+
+<!-- ================= RESULT ================= -->
+<section id="result" class="screen">
+  <div class="viewer-stage">
+    <canvas id="viewer-canvas"></canvas>
+    <div class="toolbar">
+      <button class="tbtn" id="t-wire">Wireframe <span>off</span></button>
+      <button class="tbtn on" id="t-tex">Texture <span>on</span></button>
+      <button class="tbtn" id="t-rot">Auto-rotate <span>off</span></button>
+      <button class="tbtn" id="t-reset">Reset view</button>
+      <label class="tbtn" for="t-bg">Background <input type="color" id="t-bg" value="#0b0e14"></label>
+    </div>
+    <div class="stats mono" id="stats">▲ 0 tris · ● 0 verts</div>
+  </div>
+  <div class="actionbar">
+    <button class="btn primary" id="dl-glb">⬇ GLB</button>
+    <button class="btn" id="dl-obj">⬇ OBJ</button>
+    <button class="btn" id="dl-stl">⬇ STL</button>
+    <button class="btn" id="dl-png">⬇ PNG</button>
+    <button class="btn ghost" id="scan-again">↺ Scan Again</button>
+  </div>
+</section>
+
+<!-- ================= ERROR OVERLAY + TOASTS ================= -->
+<div class="overlay" id="overlay">
+  <div class="card">
+    <div class="ico" id="ov-ico">⚠️</div>
+    <h2 id="ov-title">Something went wrong</h2>
+    <p id="ov-msg"></p>
+    <div class="cap-controls">
+      <button class="btn primary" id="ov-retry">Retry</button>
+      <button class="btn ghost" id="ov-dismiss">Dismiss</button>
+    </div>
+  </div>
+</div>
+<div id="toasts" aria-live="polite"></div>
+
+<!-- MediaPipe Face Mesh (classic UMD script → global `FaceMesh`). Loads before the deferred module below. -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
+
+<script type="module">
+/* =====================================================================
+ *  FaceForge 3D — client-side face scan → textured 3D model
+ *  Sections: config · dom · state · camera · face-mesh · capture flow ·
+ *            reconstruction · viewer · export · errors/toasts · reset
+ * ===================================================================== */
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { OBJExporter }  from 'three/addons/exporters/OBJExporter.js';
+import { STLExporter }  from 'three/addons/exporters/STLExporter.js';
+import Delaunator       from 'https://cdn.jsdelivr.net/npm/delaunator@5.0.1/+esm';
+
+/* ---------- CONFIG (all tunable thresholds live here) ---------- */
+const CONFIG = {
+  yawScale: 150,       // maps the (nose-vs-cheeks) ratio to pseudo-degrees
+  frontYaw: 12,        // |yaw| ≤ this ⇒ facing forward (front step aligned)
+  sideYawMin: 30,      // side step target zone (pseudo-degrees), a touch forgiving
+  sideYawMax: 62,
+  gaugeMax: 60,        // gauge sweeps ±this many degrees
+  darkLuma: 55,        // avg luma (0-255) below this ⇒ "too dark"
+  minFaceFrac: 0.16,   // face-width / frame-width below this ⇒ "too far"
+  noFaceMs: 3000,      // no face this long ⇒ show hint
+  holdMs: 900,         // must stay in the side zone this long before countdown
+  soundOn: false,      // camera-click sound (muted by default per PRD)
+  LM_COUNT: 468,       // MediaPipe Face Mesh landmark count (refineLandmarks off)
+};
+const STEPS = ['front', 'left', 'right'];
+
+/* ---------- DOM helpers ---------- */
+const $ = (s) => document.querySelector(s);
+const screens = {
+  landing: $('#landing'), capture: $('#capture'), review: $('#review'),
+  processing: $('#processing'), result: $('#result'),
+};
+
+/* ---------- App state ---------- */
+const captures = { front: null, left: null, right: null }; // {image:canvas, landmarks:[{x,y,z}], size:{w,h}}
+let stream = null, faceMesh = null, sending = false, rafDetect = 0, scanning = false;
+let currentStep = 'front';
+let latest = { landmarks: null, yaw: 0, box: null, multi: false, luma: 255 };
+let lastFaceAt = 0, hintShown = false;
+let holdStart = 0, countdownActive = false, countdownEndsAt = 0;
+// viewer resources (disposed on reset)
+let renderer, scene, camera, controls, mesh, geometry, material, texture, rafViewer = 0, onResize = null;
+let procTimer = 0;
+
+/* =====================================================================
+ *  SCREEN ROUTING  (also drives camera lifecycle)
+ * ===================================================================== */
+function showScreen(name){
+  Object.values(screens).forEach((s) => s.classList.remove('active'));
+  screens[name].classList.add('active');
+}
+
+/* =====================================================================
+ *  CAMERA
+ * ===================================================================== */
+async function initCamera(){
+  // `ideal` (not exact) so odd-resolution devices don't throw OverconstrainedError.
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false,
+  });
+  const video = $('#video');
+  video.srcObject = stream;
+  await video.play();
+  return stream;
+}
+function stopCamera(){
+  scanning = false;
+  cancelAnimationFrame(rafDetect);
+  if (stream){ stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  const video = $('#video');
+  if (video) video.srcObject = null;
+}
+
+/* =====================================================================
+ *  FACE MESH  (MediaPipe, loaded from CDN as a global)
+ * ===================================================================== */
+async function initFaceMesh(){
+  if (faceMesh) return faceMesh;
+  if (typeof FaceMesh === 'undefined')
+    throw new Error('cdn'); // face_mesh.js failed to load
+  faceMesh = new FaceMesh({
+    locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`,
+  });
+  faceMesh.setOptions({
+    maxNumFaces: 2,          // 2 so we can warn on multiple faces; we use the largest
+    refineLandmarks: false,  // exactly 468 landmarks (no iris refinement)
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+  faceMesh.onResults(onResults);
+  await faceMesh.initialize();  // downloads wasm/model — throws if the CDN blocks it
+  return faceMesh;
+}
+
+// rAF pump: one send in flight at a time (send() resolves after onResults fires).
+async function detectLoop(){
+  if (!scanning) return;
+  const video = $('#video');
+  if (!sending && video && video.readyState >= 2){
+    sending = true;
+    try { await faceMesh.send({ image: video }); }
+    catch(e){ /* transient frame error — ignore */ }
+    sending = false;
+  }
+  rafDetect = requestAnimationFrame(detectLoop);
+}
+
+/* Pick the largest face, cache landmarks, and update all capture UI. */
+function onResults(results){
+  const faces = results.multiFaceLandmarks || [];
+  latest.multi = faces.length > 1;
+  if (faces.length === 0){
+    latest.landmarks = null;
+    handleNoFace();
+    updateAlignmentUI(null);
+    return;
+  }
+  lastFaceAt = performance.now();
+  if (hintShown){ $('#hintbar').classList.add('hidden'); hintShown = false; }
+
+  const lm = faces.length === 1 ? faces[0] : largestFace(faces);
+  latest.landmarks = lm;
+  latest.box = faceBox(lm);
+  latest.yaw = estimateYaw(lm);
+  latest.luma = frameBrightness();
+
+  updateAlignmentUI(lm);
+}
+
+function largestFace(faces){
+  let best = faces[0], bestArea = -1;
+  for (const f of faces){ const b = faceBox(f); const a = b.w * b.h; if (a > bestArea){ bestArea = a; best = f; } }
+  return best;
+}
+function faceBox(lm){
+  let minx = 1, miny = 1, maxx = 0, maxy = 0;
+  for (const p of lm){ if (p.x < minx) minx = p.x; if (p.x > maxx) maxx = p.x; if (p.y < miny) miny = p.y; if (p.y > maxy) maxy = p.y; }
+  return { minx, miny, w: maxx - minx, h: maxy - miny };
+}
+
+// Heuristic yaw: horizontal position of the nose tip (1) between the two
+// face-contour extremes (234 / 454). ~0.5 ratio ⇒ frontal. Mapped to pseudo-degrees.
+// NOT a calibrated PnP solve — the visual gauge/target-zone is what the user follows.
+function estimateYaw(lm){
+  const nose = lm[1], a = lm[234], b = lm[454];
+  const span = (b.x - a.x) || 1e-6;
+  const ratio = (nose.x - a.x) / span;
+  return (ratio - 0.5) * 2 * CONFIG.yawScale;
+}
+
+// Average luma of a tiny downscaled frame → brightness check.
+const briCanvas = document.createElement('canvas'); briCanvas.width = 32; briCanvas.height = 24;
+const briCtx = briCanvas.getContext('2d', { willReadFrequently: true });
+function frameBrightness(){
+  const video = $('#video');
+  if (!video || video.readyState < 2) return 255;
+  try {
+    briCtx.drawImage(video, 0, 0, 32, 24);
+    const d = briCtx.getImageData(0, 0, 32, 24).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+    return sum / (d.length / 4);
+  } catch(e){ return 255; }
+}
+
+function handleNoFace(){
+  if (!scanning) return;
+  if (performance.now() - lastFaceAt > CONFIG.noFaceMs && !hintShown){
+    $('#hintbar').classList.remove('hidden'); hintShown = true;
+  }
+  resetCountdown();
+}
+
+/* =====================================================================
+ *  CAPTURE FLOW  (front → left → right wizard)
+ * ===================================================================== */
+function updateAlignmentUI(lm){
+  const stage = $('#stage'), chip = $('#align-chip'), btn = $('#capture-btn');
+  updateGauge(lm ? latest.yaw : 0);
+
+  // quality warnings (independent of alignment)
+  updateWarnings(lm);
+
+  if (!lm){
+    stage.classList.remove('aligned');
+    chip.className = 'chip warn'; chip.textContent = 'No face detected';
+    btn.disabled = true; resetCountdown();
+    return;
+  }
+
+  const yaw = latest.yaw;
+  let aligned = false, msg = '';
+  if (currentStep === 'front'){
+    aligned = Math.abs(yaw) <= CONFIG.frontYaw;
+    msg = aligned ? '✓ Aligned — hold still' : (yaw > 0 ? 'Turn slightly left…' : 'Turn slightly right…');
+  } else {
+    // side steps: in the target zone (either sign shown via gauge); direction hinted by step
+    const inZone = Math.abs(yaw) >= CONFIG.sideYawMin && Math.abs(yaw) <= CONFIG.sideYawMax;
+    aligned = inZone;
+    msg = inZone ? '✓ Hold still — capturing' : `Keep turning ${currentStep === 'left' ? 'left' : 'right'}…`;
+  }
+
+  stage.classList.toggle('aligned', aligned && !hasQualityBlock());
+  chip.className = 'chip ' + (aligned ? 'good' : 'warn');
+  chip.textContent = msg;
+
+  const ok = aligned && !hasQualityBlock();
+  btn.disabled = !ok;
+
+  // side steps auto-capture after a short hold; front waits for the button.
+  if (currentStep !== 'front') handleAutoCapture(ok);
+  else resetCountdown();
+
+  // offer a manual override if the user can't align for a while
+  toggleForceLink(!ok);
+}
+
+let forceSince = 0;
+function toggleForceLink(struggling){
+  const link = $('#force-capture');
+  if (!struggling){ forceSince = 0; link.classList.add('hidden'); return; }
+  if (!forceSince) forceSince = performance.now();
+  if (performance.now() - forceSince > 4000) link.classList.remove('hidden');
+}
+
+function handleAutoCapture(inZone){
+  const cd = $('#countdown');
+  if (!inZone){ resetCountdown(); return; }
+  const now = performance.now();
+  if (!holdStart) holdStart = now;
+  if (now - holdStart < CONFIG.holdMs) return;         // require a brief steady hold first
+  if (!countdownActive){ countdownActive = true; countdownEndsAt = now + 3000; }
+  const remain = Math.ceil((countdownEndsAt - now) / 1000);
+  if (remain > 0){ cd.classList.add('show'); cd.textContent = String(remain); }
+  else { resetCountdown(); doCapture(); }
+}
+function resetCountdown(){
+  holdStart = 0; countdownActive = false;
+  const cd = $('#countdown'); if (cd){ cd.classList.remove('show'); cd.textContent = ''; }
+}
+
+function hasQualityBlock(){ return warnState.tooDark || warnState.tooFar; }
+const warnState = { tooDark: false, tooFar: false, multi: false };
+function updateWarnings(lm){
+  warnState.tooDark = latest.luma < CONFIG.darkLuma;
+  warnState.tooFar  = lm ? (latest.box.w < CONFIG.minFaceFrac) : false;
+  warnState.multi   = latest.multi;
+  const bar = $('#warnbar');
+  let msg = '';
+  if (warnState.multi) msg = '👥 More than one face detected — only you should be in frame';
+  else if (warnState.tooDark) msg = '💡 Too dark — find better lighting';
+  else if (warnState.tooFar)  msg = '↔ Move a little closer to the camera';
+  if (msg){ bar.textContent = msg; bar.classList.remove('hidden'); }
+  else bar.classList.add('hidden');
+}
+
+// Gauge: rotate the needle by clamped yaw; draw the current step's target zone arc.
+function updateGauge(yaw){
+  const deg = Math.max(-CONFIG.gaugeMax, Math.min(CONFIG.gaugeMax, yaw));
+  $('#gauge-needle').style.transform = `rotate(${deg}deg)`;
+  $('#gauge-zone').setAttribute('d', zonePath());
+}
+// Map a yaw in [-gaugeMax,+gaugeMax] to a point on the r=42 semicircle centred (50,50).
+function yawToArcPoint(yaw){
+  const t = (yaw + CONFIG.gaugeMax) / (2 * CONFIG.gaugeMax); // 0..1 left→right
+  const ang = Math.PI - t * Math.PI;                          // 180°→0°
+  return [50 + 42 * Math.cos(ang), 50 - 42 * Math.sin(ang)];
+}
+function zonePath(){
+  let a, b;
+  if (currentStep === 'front'){ a = -CONFIG.frontYaw; b = CONFIG.frontYaw; }
+  else if (currentStep === 'left'){ a = -CONFIG.sideYawMax; b = -CONFIG.sideYawMin; }
+  else { a = CONFIG.sideYawMin; b = CONFIG.sideYawMax; }
+  const p0 = yawToArcPoint(a), p1 = yawToArcPoint(b);
+  return `M ${p0[0].toFixed(1)} ${p0[1].toFixed(1)} A 42 42 0 0 1 ${p1[0].toFixed(1)} ${p1[1].toFixed(1)}`;
+}
+
+/* Snapshot the current frame + landmarks for the current step. */
+function doCapture(){
+  if (!latest.landmarks){ toast('No face detected — try again', 'bad'); return; }
+  const video = $('#video');
+  const w = video.videoWidth, h = video.videoHeight;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  // Draw the RAW (unmirrored) frame so pixels line up with MediaPipe landmark coords.
+  canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+
+  captures[currentStep] = {
+    image: canvas,
+    landmarks: latest.landmarks.map((p) => ({ x: p.x, y: p.y, z: p.z })), // deep copy
+    size: { w, h },
+  };
+
+  flash(); if (CONFIG.soundOn) shutterSound();
+  setThumb(currentStep, canvas);
+  resetCountdown();
+
+  // advance to the next still-uncaptured angle; when all three exist → review.
+  // (this also makes single-angle retakes return straight to review)
+  const remaining = STEPS.find((s) => !captures[s]);
+  if (remaining) goToStep(remaining);
+  else finishCapture();
+}
+
+function flash(){ const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go'); }
+function shutterSound(){
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = 1200; o.connect(g); g.connect(ac.destination);
+    g.gain.setValueAtTime(0.001, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.2, ac.currentTime + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.08);
+    o.start(); o.stop(ac.currentTime + 0.09);
+  } catch(e){}
+}
+
+function setThumb(angle, canvas){
+  const thumb = document.querySelector(`.thumbs .thumb[data-angle="${angle}"]`);
+  const frame = thumb.querySelector('.frame');
+  frame.classList.remove('empty'); frame.innerHTML = '';
+  const img = new Image(); img.src = canvas.toDataURL('image/jpeg', 0.8);
+  frame.appendChild(img);
+  if (!thumb.querySelector('.retake')){
+    const r = document.createElement('button');
+    r.className = 'btn retake'; r.textContent = '↺'; r.title = `Retake ${angle}`;
+    r.onclick = (e) => { e.stopPropagation(); goToStep(angle); };
+    thumb.appendChild(r);
+  }
+}
+
+function goToStep(step){
+  currentStep = step;
+  const i = STEPS.indexOf(step);
+  $('#step-label').textContent = `Step ${i + 1} of 3`;
+  document.querySelectorAll('#segbar .seg').forEach((s, idx) => {
+    s.className = 'seg' + (captures[STEPS[idx]] ? ' done' : (idx === i ? ' current' : ''));
+  });
+  const instr = {
+    front: 'Look straight at the camera and keep your face inside the oval.',
+    left:  'Slowly turn your head to the LEFT until the marker reaches the green zone.',
+    right: 'Slowly turn your head to the RIGHT until the marker reaches the green zone.',
+  };
+  $('#instruction').textContent = instr[step];
+  resetCountdown(); forceSince = 0; $('#force-capture').classList.add('hidden');
+  showScreen('capture');
+  ensureScanning();
+}
+
+async function ensureScanning(){
+  if (scanning && stream) return;
+  try {
+    if (!stream) await initCamera();
+    await initFaceMesh();
+    scanning = true; lastFaceAt = performance.now();
+    detectLoop();
+  } catch(err){ handleInitError(err); }
+}
+
+function finishCapture(){
+  stopCamera();               // release the camera as soon as we leave capture (privacy)
+  renderReviewThumbs();
+  showScreen('review');
+}
+
+/* =====================================================================
+ *  REVIEW
+ * ===================================================================== */
+function renderReviewThumbs(){
+  const host = $('#review-thumbs'); host.innerHTML = '';
+  for (const angle of STEPS){
+    const c = captures[angle];
+    const div = document.createElement('div'); div.className = 'thumb';
+    const frame = document.createElement('div'); frame.className = 'frame';
+    if (c){ const img = new Image(); img.src = c.image.toDataURL('image/jpeg', 0.85); frame.appendChild(img); }
+    const label = document.createElement('div'); label.className = 'cap-label'; label.textContent = angle;
+    const retake = document.createElement('button'); retake.className = 'btn ghost'; retake.textContent = 'Retake';
+    retake.style.marginTop = '8px'; retake.onclick = () => goToStep(angle);
+    div.appendChild(frame); div.appendChild(label); div.appendChild(retake);
+    host.appendChild(div);
+  }
+}
+
+/* =====================================================================
+ *  3D RECONSTRUCTION
+ * ===================================================================== */
+function toModelPoint(p, aspect){
+  // image (x∈[0,1] right, y∈[0,1] down, z≈x-scale, more-negative = closer)
+  // → model (x right, y up, z toward viewer)
+  return new THREE.Vector3((p.x - 0.5) * aspect, -(p.y - 0.5), -p.z);
+}
+function centroid(arr){ const c = { x:0, y:0, z:0 }; for (const p of arr){ c.x+=p.x; c.y+=p.y; c.z+=p.z; } const n=arr.length; c.x/=n; c.y/=n; c.z/=n; return c; }
+// De-rotate a side landmark set about its centroid (y-axis) so its z becomes
+// comparable to the frontal view. Approximate — used only for depth blending.
+function derotateY(set, angleRad){
+  const c = centroid(set), cos = Math.cos(angleRad), sin = Math.sin(angleRad);
+  return set.map((p) => {
+    const x = p.x - c.x, z = p.z - c.z;
+    return { x: c.x + x*cos + z*sin, y: p.y, z: c.z + (-x*sin + z*cos) };
+  });
+}
+
+// Blend depth: front supplies x,y (and primary z); de-rotated sides refine z.
+function blendDepth(front, left, right){
+  const N = front.length;
+  const dl = left  ? derotateY(left,  -deg2rad(estimateYawOf(left)))  : null;
+  const dr = right ? derotateY(right, -deg2rad(estimateYawOf(right))) : null;
+  const out = new Array(N);
+  for (let i = 0; i < N; i++){
+    const f = front[i];
+    let z = 2 * f.z, w = 2;                       // front weighted 2×
+    if (dl && dl[i]){ z += dl[i].z; w += 1; }
+    if (dr && dr[i]){ z += dr[i].z; w += 1; }
+    out[i] = { x: f.x, y: f.y, z: z / w };
+  }
+  return out;
+}
+function estimateYawOf(lm){ const nose=lm[1], a=lm[234], b=lm[454]; const span=(b.x-a.x)||1e-6; return ((nose.x-a.x)/span - 0.5) * 2 * CONFIG.yawScale; }
+function deg2rad(d){ return d * Math.PI / 180; }
+
+function buildMesh(){
+  const front = captures.front;
+  if (!front || front.landmarks.length < CONFIG.LM_COUNT) throw new Error('Front capture is missing landmarks.');
+  const aspect = front.size.w / front.size.h;
+  const blended = blendDepth(front.landmarks, captures.left?.landmarks, captures.right?.landmarks);
+
+  // --- vertex positions ---
+  const verts = blended.map((p) => toModelPoint(p, aspect));
+
+  // --- triangulation: Delaunay over the FRONT 2D landmarks ---------------
+  // The frontal face is near-planar, so a 2D Delaunay triangulation of the
+  // landmark points yields a clean, printable mesh without needing MediaPipe's
+  // ~2.6k-edge canonical TESSELATION list embedded. (Swappable if desired.)
+  const pts2d = front.landmarks.map((p) => [p.x * aspect, p.y]);
+  const del = Delaunator.from(pts2d);
+  const rawTris = del.triangles;
+
+  // Drop hull-spanning sliver triangles (edge much longer than typical) so the
+  // silhouette/eyes/mouth openings aren't bridged by stretched faces.
+  const edgeLens = [];
+  for (let i = 0; i < rawTris.length; i += 3){
+    edgeLens.push(triMaxEdge(pts2d, rawTris[i], rawTris[i+1], rawTris[i+2]));
+  }
+  const median = edgeLens.slice().sort((a,b) => a-b)[Math.floor(edgeLens.length/2)] || 1;
+  const maxEdge = median * 2.4;
+  const index = [];
+  for (let i = 0, t = 0; i < rawTris.length; i += 3, t++){
+    if (edgeLens[t] <= maxEdge) index.push(rawTris[i], rawTris[i+1], rawTris[i+2]);
+  }
+
+  // --- build BufferGeometry ---
+  const geo = new THREE.BufferGeometry();
+  const posArr = new Float32Array(verts.length * 3);
+  const uvArr  = new Float32Array(verts.length * 2);
+  for (let i = 0; i < verts.length; i++){
+    posArr[i*3] = verts[i].x; posArr[i*3+1] = verts[i].y; posArr[i*3+2] = verts[i].z;
+    // UVs from front 2D landmarks. Default texture.flipY=true ⇒ v = 1 - y.
+    uvArr[i*2] = front.landmarks[i].x; uvArr[i*2+1] = 1 - front.landmarks[i].y;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+  geo.setIndex(index);
+
+  // center at origin and scale to a sensible size (max dim ≈ 2 units)
+  geo.computeBoundingBox();
+  const c = new THREE.Vector3(); geo.boundingBox.getCenter(c);
+  geo.translate(-c.x, -c.y, -c.z);
+  const size = new THREE.Vector3(); geo.boundingBox.getSize(size);
+  const s = 2 / Math.max(size.x, size.y, size.z);
+  geo.scale(s, s, s);
+  geo.computeVertexNormals(); // smooth normals
+
+  return geo;
+}
+function triMaxEdge(pts, a, b, c){
+  const d = (i,j) => Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1]);
+  return Math.max(d(a,b), d(b,c), d(c,a));
+}
+
+// Front photo → texture, applied via the UVs baked in buildMesh().
+function applyTexture(frontCanvas){
+  const tex = new THREE.CanvasTexture(frontCanvas); // flipY defaults to true
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+/* =====================================================================
+ *  3D VIEWER
+ * ===================================================================== */
+function initViewer(geo){
+  const canvas = $('#viewer-canvas');
+  const stage = canvas.parentElement;
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true, alpha: false });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color('#0b0e14');
+
+  camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+  camera.position.set(0, 0, 3.2);
+
+  // three-point lighting + soft ambient
+  const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(2, 2, 3);
+  const fill = new THREE.DirectionalLight(0xbcd4ff, 0.8); fill.position.set(-3, 0.5, 2);
+  const rim = new THREE.DirectionalLight(0xffffff, 1.2); rim.position.set(0, 2, -3);
+  scene.add(key, fill, rim, new THREE.AmbientLight(0xffffff, 0.5), new THREE.HemisphereLight(0xdfe9ff, 0x0b0e14, 0.5));
+
+  texture = applyTexture(captures.front.image);
+  material = new THREE.MeshStandardMaterial({
+    map: texture, roughness: 0.72, metalness: 0.0, side: THREE.DoubleSide,
+  });
+  geometry = geo;
+  mesh = new THREE.Mesh(geometry, material);
+  scene.add(mesh);
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.dampingFactor = 0.08;
+  controls.minDistance = 1.2; controls.maxDistance = 8;
+  controls.autoRotateSpeed = 2.0;
+
+  onResize = () => {
+    const w = stage.clientWidth, h = stage.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+  };
+  window.addEventListener('resize', onResize); onResize();
+  controls.saveState(); // so "Reset view" returns here
+
+  const stats = $('#stats');
+  const tris = (geo.getIndex().count / 3) | 0;
+  const verts = geo.getAttribute('position').count;
+  stats.textContent = `▲ ${tris.toLocaleString()} tris · ● ${verts.toLocaleString()} verts`;
+
+  (function loop(){ rafViewer = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+}
+
+/* viewer toggles */
+function wireViewerControls(){
+  const tw = $('#t-wire'), tt = $('#t-tex'), tr = $('#t-rot');
+  tw.onclick = () => { material.wireframe = !material.wireframe; tw.classList.toggle('on', material.wireframe); tw.querySelector('span').textContent = material.wireframe ? 'on' : 'off'; };
+  tt.onclick = () => {
+    const on = !material.map;
+    material.map = on ? texture : null;
+    material.color.set(on ? 0xffffff : 0xd8b3a0); // fallback skin tone
+    material.needsUpdate = true;
+    tt.classList.toggle('on', on); tt.querySelector('span').textContent = on ? 'on' : 'off';
+  };
+  tr.onclick = () => { controls.autoRotate = !controls.autoRotate; tr.classList.toggle('on', controls.autoRotate); tr.querySelector('span').textContent = controls.autoRotate ? 'on' : 'off'; };
+  $('#t-reset').onclick = () => controls.reset();
+  $('#t-bg').oninput = (e) => scene.background.set(e.target.value);
+}
+
+/* =====================================================================
+ *  EXPORT
+ * ===================================================================== */
+function download(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+function exportGLB(){
+  new GLTFExporter().parse(mesh,
+    (result) => { download(new Blob([result], { type: 'model/gltf-binary' }), 'my-face-scan.glb'); toast('Downloaded my-face-scan.glb', 'good'); },
+    (err) => { toast('GLB export failed', 'bad'); console.error(err); },
+    { binary: true });
+}
+function exportOBJ(){
+  try { const txt = new OBJExporter().parse(mesh);
+    download(new Blob([txt], { type: 'text/plain' }), 'my-face-scan.obj');
+    toast('Downloaded my-face-scan.obj (texture: see the GLB)', 'good');
+  } catch(e){ toast('OBJ export failed', 'bad'); console.error(e); }
+}
+function exportSTL(){
+  try { const data = new STLExporter().parse(mesh, { binary: true });
+    download(new Blob([data], { type: 'model/stl' }), 'my-face-scan.stl');
+    toast('Downloaded my-face-scan.stl (untextured — for 3D printing)', 'good');
+  } catch(e){ toast('STL export failed', 'bad'); console.error(e); }
+}
+function exportPNG(){
+  renderer.render(scene, camera); // ensure a fresh frame in the buffer
+  renderer.domElement.toBlob((blob) => {
+    if (!blob){ toast('PNG export failed', 'bad'); return; }
+    download(blob, 'my-face-scan.png'); toast('Downloaded my-face-scan.png', 'good');
+  }, 'image/png');
+}
+
+/* =====================================================================
+ *  ERRORS + TOASTS
+ * ===================================================================== */
+function toast(msg, kind){
+  const t = document.createElement('div'); t.className = 'toast ' + (kind || '');
+  t.textContent = msg; $('#toasts').appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2600);
+}
+function showError(title, msg, onRetry){
+  $('#ov-ico').textContent = '⚠️'; $('#ov-title').textContent = title; $('#ov-msg').textContent = msg;
+  const retry = $('#ov-retry');
+  retry.classList.toggle('hidden', !onRetry);
+  retry.onclick = () => { hideError(); if (onRetry) onRetry(); };
+  $('#overlay').classList.add('show');
+}
+function hideError(){ $('#overlay').classList.remove('show'); }
+$('#ov-dismiss').onclick = hideError;
+
+function handleInitError(err){
+  scanning = false; cancelAnimationFrame(rafDetect);
+  if (err && err.message === 'cdn'){
+    showError('Couldn’t load the face model', 'The MediaPipe face-mesh library failed to load from the CDN. Check your connection and retry.', () => ensureScanning());
+  } else if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError' || err.name === 'PermissionDeniedError')){
+    showError('Camera permission needed', 'FaceForge needs your camera to scan. Allow camera access in your browser’s site settings (address-bar icon), then retry.', () => ensureScanning());
+  } else if (err && (err.name === 'NotFoundError' || err.name === 'OverconstrainedError' || err.name === 'NotReadableError')){
+    showError('No usable camera', 'No camera was found or it’s in use by another app. Close other apps using the camera and retry.', () => ensureScanning());
+  } else {
+    showError('Camera error', (err && err.message) || 'Could not start the camera.', () => ensureScanning());
+  }
+}
+
+/* =====================================================================
+ *  PROCESSING  →  build + view
+ * ===================================================================== */
+function startProcessing(){
+  showScreen('processing');
+  const msgs = ['Detecting landmarks…', 'Blending depth from side captures…', 'Triangulating mesh…', 'Baking texture…'];
+  let i = 0; $('#proc-status').textContent = msgs[0];
+  procTimer = setInterval(() => { i = (i + 1) % msgs.length; $('#proc-status').textContent = msgs[i]; }, 900);
+
+  // let the spinner paint before the (synchronous) heavy build
+  setTimeout(() => {
+    try {
+      disposeViewer(); // in case of a re-run
+      const geo = buildMesh();
+      // Show the result screen BEFORE initViewer so the canvas stage has real
+      // layout dimensions (a hidden display:none stage reports 0×0, which would
+      // size the WebGL canvas to 0 until the next window resize).
+      showScreen('result');
+      initViewer(geo);
+      wireViewerControls();
+      clearInterval(procTimer);
+    } catch(err){
+      clearInterval(procTimer);
+      console.error(err);
+      showError('Reconstruction failed', (err && err.message) || 'We couldn’t build the 3D model from these captures. Try retaking the front photo with your whole face clearly in frame.', () => { showScreen('review'); });
+    }
+  }, 120);
+}
+
+/* =====================================================================
+ *  RESET / DISPOSE  (no leaks)
+ * ===================================================================== */
+function disposeViewer(){
+  cancelAnimationFrame(rafViewer); rafViewer = 0;
+  if (onResize){ window.removeEventListener('resize', onResize); onResize = null; }
+  if (controls) controls.dispose();
+  if (geometry) geometry.dispose();
+  if (material) material.dispose();
+  if (texture) texture.dispose();
+  if (mesh && scene) scene.remove(mesh);
+  if (renderer) renderer.dispose();
+  renderer = scene = camera = controls = mesh = geometry = material = texture = null;
+}
+function resetAll(){
+  disposeViewer();
+  stopCamera();
+  captures.front = captures.left = captures.right = null;
+  document.querySelectorAll('.thumbs .thumb').forEach((th) => {
+    const angle = th.dataset.angle;
+    th.querySelector('.frame').className = 'frame empty';
+    th.querySelector('.frame').innerHTML = angle[0].toUpperCase() + angle.slice(1);
+    const r = th.querySelector('.retake'); if (r) r.remove();
+  });
+  showScreen('landing');
+}
+
+/* =====================================================================
+ *  WIRING
+ * ===================================================================== */
+$('#start-btn').onclick = () => goToStep('front');
+$('#capture-btn').onclick = () => doCapture();
+$('#force-capture').onclick = () => doCapture();
+$('#cap-restart').onclick = () => { stopCamera(); resetAll(); };
+$('#review-restart').onclick = () => resetAll();
+$('#build-btn').onclick = () => startProcessing();
+$('#dl-glb').onclick = exportGLB;
+$('#dl-obj').onclick = exportOBJ;
+$('#dl-stl').onclick = exportSTL;
+$('#dl-png').onclick = exportPNG;
+$('#scan-again').onclick = () => resetAll();
+
+// clicking a capture thumbnail also retakes that angle
+document.querySelectorAll('.thumbs .thumb').forEach((th) => {
+  th.querySelector('.frame').onclick = () => { if (captures[th.dataset.angle]) goToStep(th.dataset.angle); };
+});
+
+// secure-context notice (camera needs https or localhost)
+if (!window.isSecureContext && !['localhost', '127.0.0.1'].includes(location.hostname)){
+  $('#secure-notice').classList.remove('hidden');
+}
+
+// Debug / QA handle. Lets automated tests drive the reconstruction + export
+// paths with synthetic landmark data (a fake webcam can't provide a real face).
+window.__faceforge = {
+  CONFIG, captures, state: () => latest,
+  buildMesh, initViewer, wireViewerControls, startProcessing,
+  get mesh(){ return mesh; },
+  qaExportSizes: () => new Promise((resolve) => {
+    const res = {};
+    try { res.obj = new OBJExporter().parse(mesh).length; } catch(e){ res.obj = 'ERR:' + e.message; }
+    try { const s = new STLExporter().parse(mesh, { binary: true }); res.stl = s.byteLength ?? s.length; }
+    catch(e){ res.stl = 'ERR:' + e.message; }
+    new GLTFExporter().parse(mesh,
+      (r) => { res.glb = r.byteLength; resolve(res); },
+      () => { res.glb = 'ERR'; resolve(res); }, { binary: true });
+  }),
+};
+</script>
+</body>
+</html>
