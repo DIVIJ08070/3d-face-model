@@ -159,7 +159,8 @@ button{font-family:inherit; font-size:15px; cursor:pointer}
 .thumb .frame img{width:100%; height:100%; object-fit:cover}
 .thumb .frame.empty{color:var(--text-dim); font-size:11px}
 .thumb .cap-label{font-size:11px; color:var(--text-dim); text-align:center; margin-top:4px}
-.thumb .retake{position:absolute; top:-6px; right:-6px; background:var(--surface); border:1px solid var(--border); border-radius:999px; width:26px; height:26px; font-size:12px; min-height:auto; padding:0}
+/* corner retake badge; the whole 88px thumbnail frame is also a retake tap-target */
+.thumb .retake{position:absolute; top:-8px; right:-8px; background:var(--surface); border:1px solid var(--border); border-radius:999px; width:36px; height:36px; font-size:15px; min-height:auto; padding:0}
 
 /* ============================================================= *
  *  REVIEW / PROCESSING                                           *
@@ -188,7 +189,7 @@ button{font-family:inherit; font-size:15px; cursor:pointer}
 }
 .toolbar .tbtn{display:flex; align-items:center; justify-content:space-between; gap:12px; min-width:150px;
                background:var(--surface-2); border:1px solid var(--border); color:var(--text);
-               padding:8px 12px; border-radius:8px; font-size:13px; min-height:40px}
+               padding:8px 12px; border-radius:8px; font-size:13px; min-height:44px}
 .toolbar .tbtn.on{border-color:var(--accent); color:var(--accent)}
 .toolbar .tbtn input[type=color]{width:26px; height:26px; border:none; background:none; padding:0; cursor:pointer}
 .stats{position:absolute; left:16px; bottom:16px; background:rgba(10,14,22,.7); border:1px solid var(--border);
@@ -343,6 +344,25 @@ button{font-family:inherit; font-size:15px; cursor:pointer}
 <!-- MediaPipe Face Mesh (classic UMD script → global `FaceMesh`). Loads before the deferred module below. -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js" crossorigin="anonymous"></script>
 
+<!-- Boot watchdog (classic, no deps): if the ES module below never initializes
+     (e.g. a CDN import for Three.js/Delaunator is blocked), the page would sit
+     dead. Show the error overlay with a Reload action instead. -->
+<script>
+window.addEventListener('load', function(){
+  setTimeout(function(){
+    if (window.__faceforge) return; // module booted fine
+    var ov = document.getElementById('overlay'); if (!ov) return;
+    document.getElementById('ov-ico').textContent = '⚠️';
+    document.getElementById('ov-title').textContent = 'Couldn’t load 3D libraries';
+    document.getElementById('ov-msg').textContent = 'A required library (Three.js, Delaunator, or MediaPipe) failed to load from its CDN. Check your connection and reload.';
+    var retry = document.getElementById('ov-retry');
+    retry.classList.remove('hidden'); retry.textContent = 'Reload';
+    retry.onclick = function(){ location.reload(); };
+    ov.classList.add('show');
+  }, 8000);
+});
+</script>
+
 <script type="module">
 /* =====================================================================
  *  FaceForge 3D — client-side face scan → textured 3D model
@@ -359,10 +379,10 @@ import Delaunator       from 'https://cdn.jsdelivr.net/npm/delaunator@5.0.1/+esm
 /* ---------- CONFIG (all tunable thresholds live here) ---------- */
 const CONFIG = {
   yawScale: 150,       // maps the (nose-vs-cheeks) ratio to pseudo-degrees
-  frontYaw: 12,        // |yaw| ≤ this ⇒ facing forward (front step aligned)
-  sideYawMin: 30,      // side step target zone (pseudo-degrees), a touch forgiving
-  sideYawMax: 62,
-  gaugeMax: 60,        // gauge sweeps ±this many degrees
+  frontYaw: 10,        // |yaw| ≤ this ⇒ facing forward (front step aligned) — PRD §2
+  sideYawMin: 35,      // side step target zone (pseudo-degrees) — PRD §2 (35..55)
+  sideYawMax: 55,
+  gaugeMax: 60,        // gauge sweeps ±this many degrees (≥ sideYawMax so the zone fits)
   darkLuma: 55,        // avg luma (0-255) below this ⇒ "too dark"
   minFaceFrac: 0.16,   // face-width / frame-width below this ⇒ "too far"
   noFaceMs: 3000,      // no face this long ⇒ show hint
@@ -402,6 +422,11 @@ function showScreen(name){
  *  CAMERA
  * ===================================================================== */
 async function initCamera(){
+  // Insecure context (file://, plain http on a non-localhost host) or an
+  // unsupported browser → mediaDevices is undefined; give a targeted message.
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    const e = new Error('insecure'); e.name = 'InsecureContext'; throw e;
+  }
   // `ideal` (not exact) so odd-resolution devices don't throw OverconstrainedError.
   stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -427,17 +452,21 @@ async function initFaceMesh(){
   if (faceMesh) return faceMesh;
   if (typeof FaceMesh === 'undefined')
     throw new Error('cdn'); // face_mesh.js failed to load
-  faceMesh = new FaceMesh({
+  const fm = new FaceMesh({
     locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`,
   });
-  faceMesh.setOptions({
+  fm.setOptions({
     maxNumFaces: 2,          // 2 so we can warn on multiple faces; we use the largest
     refineLandmarks: false,  // exactly 468 landmarks (no iris refinement)
     minDetectionConfidence: 0.5,
     minTrackingConfidence: 0.5,
   });
-  faceMesh.onResults(onResults);
-  await faceMesh.initialize();  // downloads wasm/model — throws if the CDN blocks it
+  fm.onResults(onResults);
+  // wasm/model download can fail independently of the script tag → surface it as
+  // the same 'cdn' error path (not a generic camera error).
+  try { await fm.initialize(); }
+  catch(e){ throw new Error('cdn'); }
+  faceMesh = fm; // publish only after a successful init so the guard can't hand out a half-ready instance
   return faceMesh;
 }
 
@@ -543,17 +572,19 @@ function updateAlignmentUI(lm){
     aligned = Math.abs(yaw) <= CONFIG.frontYaw;
     msg = aligned ? '✓ Aligned — hold still' : (yaw > 0 ? 'Turn slightly left…' : 'Turn slightly right…');
   } else {
-    // side steps: in the target zone (either sign shown via gauge); direction hinted by step
-    const inZone = Math.abs(yaw) >= CONFIG.sideYawMin && Math.abs(yaw) <= CONFIG.sideYawMax;
-    aligned = inZone;
+    // Side steps enforce the correct turn DIRECTION (signed yaw), matching the
+    // gauge's target zone (see sideInZone). Previously used Math.abs, which let a
+    // wrong-way turn capture — PRD §2 (LEFT −35..−55, RIGHT +35..+55).
+    aligned = sideInZone(currentStep, yaw);
     msg = inZone ? '✓ Hold still — capturing' : `Keep turning ${currentStep === 'left' ? 'left' : 'right'}…`;
   }
 
-  stage.classList.toggle('aligned', aligned && !hasQualityBlock());
-  chip.className = 'chip ' + (aligned ? 'good' : 'warn');
-  chip.textContent = msg;
-
+  // capture is only OK when aligned AND not blocked by a quality warning; the
+  // chip reflects that combined state (and names the blocking warning if any).
   const ok = aligned && !hasQualityBlock();
+  stage.classList.toggle('aligned', ok);
+  chip.className = 'chip ' + (ok ? 'good' : 'warn');
+  chip.textContent = (aligned && hasQualityBlock()) ? (warnState.msg || 'Adjust and hold still') : msg;
   btn.disabled = !ok;
 
   // side steps auto-capture after a short hold; front waits for the button.
@@ -562,6 +593,14 @@ function updateAlignmentUI(lm){
 
   // offer a manual override if the user can't align for a while
   toggleForceLink(!ok);
+}
+
+// Signed side-step gate: LEFT accepts yaw in [-max,-min], RIGHT in [min,max].
+// Pure + exported so it can be unit-tested (see the QA suite).
+function sideInZone(step, yaw){
+  return step === 'left'
+    ? (yaw <= -CONFIG.sideYawMin && yaw >= -CONFIG.sideYawMax)
+    : (yaw >=  CONFIG.sideYawMin && yaw <=  CONFIG.sideYawMax);
 }
 
 let forceSince = 0;
@@ -589,9 +628,11 @@ function resetCountdown(){
 }
 
 function hasQualityBlock(){ return warnState.tooDark || warnState.tooFar; }
-const warnState = { tooDark: false, tooFar: false, multi: false };
+const warnState = { tooDark: false, tooFar: false, multi: false, msg: '' };
 function updateWarnings(lm){
-  warnState.tooDark = latest.luma < CONFIG.darkLuma;
+  // luma is only meaningful when a face is present; gate on lm so a stale "too
+  // dark" reading doesn't linger during the no-face branch.
+  warnState.tooDark = lm ? (latest.luma < CONFIG.darkLuma) : false;
   warnState.tooFar  = lm ? (latest.box.w < CONFIG.minFaceFrac) : false;
   warnState.multi   = latest.multi;
   const bar = $('#warnbar');
@@ -599,6 +640,7 @@ function updateWarnings(lm){
   if (warnState.multi) msg = '👥 More than one face detected — only you should be in frame';
   else if (warnState.tooDark) msg = '💡 Too dark — find better lighting';
   else if (warnState.tooFar)  msg = '↔ Move a little closer to the camera';
+  warnState.msg = msg;
   if (msg){ bar.textContent = msg; bar.classList.remove('hidden'); }
   else bar.classList.add('hidden');
 }
@@ -661,6 +703,7 @@ function shutterSound(){
     g.gain.exponentialRampToValueAtTime(0.2, ac.currentTime + 0.005);
     g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.08);
     o.start(); o.stop(ac.currentTime + 0.09);
+    o.onended = () => { try { ac.close(); } catch(e){} }; // don't leak an AudioContext per shutter
   } catch(e){}
 }
 
@@ -683,7 +726,8 @@ function goToStep(step){
   const i = STEPS.indexOf(step);
   $('#step-label').textContent = `Step ${i + 1} of 3`;
   document.querySelectorAll('#segbar .seg').forEach((s, idx) => {
-    s.className = 'seg' + (captures[STEPS[idx]] ? ' done' : (idx === i ? ' current' : ''));
+    // the step being (re)done shows 'current' even if it was already captured
+    s.className = 'seg' + (idx === i ? ' current' : (captures[STEPS[idx]] ? ' done' : ''));
   });
   const instr = {
     front: 'Look straight at the camera and keep your face inside the oval.',
@@ -696,14 +740,22 @@ function goToStep(step){
   ensureScanning();
 }
 
+let starting = null; // in-flight guard: prevents concurrent ensureScanning() calls
+                     // from spinning up multiple camera inits / detectLoop chains.
 async function ensureScanning(){
   if (scanning && stream) return;
-  try {
-    if (!stream) await initCamera();
-    await initFaceMesh();
-    scanning = true; lastFaceAt = performance.now();
-    detectLoop();
-  } catch(err){ handleInitError(err); }
+  if (starting) return starting;
+  starting = (async () => {
+    try {
+      if (!stream) await initCamera();
+      await initFaceMesh();
+      scanning = true; lastFaceAt = performance.now();
+      cancelAnimationFrame(rafDetect); // guarantee a single detect loop
+      detectLoop();
+    } catch(err){ handleInitError(err); }
+    finally { starting = null; }
+  })();
+  return starting;
 }
 
 function finishCapture(){
@@ -749,18 +801,25 @@ function derotateY(set, angleRad){
   });
 }
 
-// Blend depth: front supplies x,y (and primary z); de-rotated sides refine z.
+// Blend depth: front supplies x,y and is the PRIMARY z. The de-rotated side
+// captures only *nudge* depth: their contribution is uncalibrated (the yaw used
+// for de-rotation is heuristic pseudo-degrees), so we weight the front heavily
+// and clamp each blended z to a bounded delta from the front value — the sides
+// can refine the nose/cheek depth but can never dominate or worsen it.
 function blendDepth(front, left, right){
   const N = front.length;
   const dl = left  ? derotateY(left,  -deg2rad(estimateYawOf(left)))  : null;
   const dr = right ? derotateY(right, -deg2rad(estimateYawOf(right))) : null;
+  const FRONT_W = 3, SIDE_W = 0.5, MAX_DELTA = 0.03; // MAX_DELTA in normalized (≈x) units
   const out = new Array(N);
   for (let i = 0; i < N; i++){
     const f = front[i];
-    let z = 2 * f.z, w = 2;                       // front weighted 2×
-    if (dl && dl[i]){ z += dl[i].z; w += 1; }
-    if (dr && dr[i]){ z += dr[i].z; w += 1; }
-    out[i] = { x: f.x, y: f.y, z: z / w };
+    let z = FRONT_W * f.z, w = FRONT_W;
+    if (dl && dl[i]){ z += SIDE_W * dl[i].z; w += SIDE_W; }
+    if (dr && dr[i]){ z += SIDE_W * dr[i].z; w += SIDE_W; }
+    z = z / w;
+    z = Math.max(f.z - MAX_DELTA, Math.min(f.z + MAX_DELTA, z)); // keep near the reliable front z
+    out[i] = { x: f.x, y: f.y, z };
   }
   return out;
 }
@@ -885,8 +944,19 @@ function initViewer(geo){
   (function loop(){ rafViewer = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
 }
 
+/* Sync the toolbar buttons to the freshly-built material/controls/scene state,
+ * so a second scan doesn't leave stale 'on/off' labels inverted from reality. */
+function resetToolbarUI(){
+  const set = (el, on, label) => { el.classList.toggle('on', on); el.querySelector('span').textContent = label; };
+  set($('#t-wire'), false, 'off'); // fresh material: wireframe off
+  set($('#t-tex'),  true,  'on');  // fresh material: textured
+  set($('#t-rot'),  false, 'off'); // fresh controls: auto-rotate off
+  $('#t-bg').value = '#0b0e14';     // fresh scene.background
+}
+
 /* viewer toggles */
 function wireViewerControls(){
+  resetToolbarUI();
   const tw = $('#t-wire'), tt = $('#t-tex'), tr = $('#t-rot');
   tw.onclick = () => { material.wireframe = !material.wireframe; tw.classList.toggle('on', material.wireframe); tw.querySelector('span').textContent = material.wireframe ? 'on' : 'off'; };
   tt.onclick = () => {
@@ -910,10 +980,20 @@ function download(blob, filename){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
+// Force the material into its textured state around an export, then restore the
+// viewer's current toggle state — so a GLB is never accidentally exported
+// untextured just because the user toggled "Texture off" in the viewer.
+function forceTextured(){
+  if (!material) return () => {};
+  const prevMap = material.map, prevColor = material.color.getHex();
+  material.map = texture; material.color.set(0xffffff); material.needsUpdate = true;
+  return () => { material.map = prevMap; material.color.setHex(prevColor); material.needsUpdate = true; };
+}
 function exportGLB(){
+  const restore = forceTextured();
   new GLTFExporter().parse(mesh,
-    (result) => { download(new Blob([result], { type: 'model/gltf-binary' }), 'my-face-scan.glb'); toast('Downloaded my-face-scan.glb', 'good'); },
-    (err) => { toast('GLB export failed', 'bad'); console.error(err); },
+    (result) => { restore(); download(new Blob([result], { type: 'model/gltf-binary' }), 'my-face-scan.glb'); toast('Downloaded my-face-scan.glb', 'good'); },
+    (err) => { restore(); toast('GLB export failed', 'bad'); console.error(err); },
     { binary: true });
 }
 function exportOBJ(){
@@ -952,12 +1032,15 @@ function showError(title, msg, onRetry){
   $('#overlay').classList.add('show');
 }
 function hideError(){ $('#overlay').classList.remove('show'); }
-$('#ov-dismiss').onclick = hideError;
+// dismissing an error also releases the camera if one was left running
+$('#ov-dismiss').onclick = () => { hideError(); stopCamera(); };
 
 function handleInitError(err){
-  scanning = false; cancelAnimationFrame(rafDetect);
+  stopCamera(); // release the camera (and stop the detect loop) behind the overlay
   if (err && err.message === 'cdn'){
-    showError('Couldn’t load the face model', 'The MediaPipe face-mesh library failed to load from the CDN. Check your connection and retry.', () => ensureScanning());
+    showError('Couldn’t load the face model', 'A required library (MediaPipe / Three.js) failed to load from the CDN. Check your connection and retry.', () => ensureScanning());
+  } else if (err && (err.name === 'InsecureContext' || err.message === 'insecure')){
+    showError('Camera needs a secure page', 'Camera access requires HTTPS or http://localhost (some browsers also block it in private windows). Open this app over https:// or localhost and retry.', () => ensureScanning());
   } else if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError' || err.name === 'PermissionDeniedError')){
     showError('Camera permission needed', 'FaceForge needs your camera to scan. Allow camera access in your browser’s site settings (address-bar icon), then retry.', () => ensureScanning());
   } else if (err && (err.name === 'NotFoundError' || err.name === 'OverconstrainedError' || err.name === 'NotReadableError')){
@@ -1020,6 +1103,14 @@ function resetAll(){
     th.querySelector('.frame').innerHTML = angle[0].toUpperCase() + angle.slice(1);
     const r = th.querySelector('.retake'); if (r) r.remove();
   });
+  // clear transient capture-screen UI so nothing stale flashes on the next scan
+  $('#hintbar').classList.add('hidden');
+  $('#warnbar').classList.add('hidden');
+  $('#force-capture').classList.add('hidden');
+  $('#stage').classList.remove('aligned');
+  const chip = $('#align-chip'); chip.className = 'chip warn'; chip.textContent = 'Getting ready…';
+  document.querySelectorAll('#segbar .seg').forEach((s, idx) => s.className = 'seg' + (idx === 0 ? ' current' : ''));
+  hintShown = false; forceSince = 0; lastFaceAt = 0; resetCountdown();
   showScreen('landing');
 }
 
@@ -1052,8 +1143,10 @@ if (!window.isSecureContext && !['localhost', '127.0.0.1'].includes(location.hos
 // paths with synthetic landmark data (a fake webcam can't provide a real face).
 window.__faceforge = {
   CONFIG, captures, state: () => latest,
-  buildMesh, initViewer, wireViewerControls, startProcessing,
+  buildMesh, initViewer, wireViewerControls, startProcessing, sideInZone, forceTextured,
   get mesh(){ return mesh; },
+  get material(){ return material; },
+  get texture(){ return texture; },
   qaExportSizes: () => new Promise((resolve) => {
     const res = {};
     try { res.obj = new OBJExporter().parse(mesh).length; } catch(e){ res.obj = 'ERR:' + e.message; }
