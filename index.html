@@ -866,47 +866,88 @@ function buildFaceGeometry(){
   return { geo, verts, hull };
 }
 
-// Loft a SKULL shell backward from the face silhouette so the result is a full
-// closed head, not a floating mask. Ring 0 is the exact face-hull rim (so the two
-// meet seamlessly); successive rings sweep along a quarter-ellipse to a single
-// back-of-head pole — the shell only ever extends backward, so it can never poke
-// through the front of the face. Returns a BufferGeometry (solid, untextured).
+// ---- Head shape constants (tweak these to taste; all relative to face size) ----
+const HEAD = {
+  rings: 16,        // cranium ring count (higher = smoother)
+  depth: 1.55,      // back-of-head depth  (× face size)
+  crownLean: 0.34,  // how much the crown leans up/back
+  bulge: 0.16,      // cranium wider than the face (temples/occiput)
+  ears: true,  earH: 0.30, earD: 0.17, earThick: 0.12, earSeg: 14, earLat: 1.06,
+  neck: true,  neckLen: 0.85, neckTopR: 0.30, neckBotR: 0.44, neckSeg: 22, neckRings: 6,
+};
+
+// Build the SKULL / head shell behind the face: a rounded cranium lofted BACKWARD
+// from the face-hull silhouette (so it can never poke through the front), plus
+// simple ears and a neck stub. Everything is one solid, skin-toned BufferGeometry;
+// ring 0 shares the face rim so the two meet seamlessly.
 function buildSkullGeometry(faceVerts, hull){
   const rim = hull.map((h) => faceVerts[h].clone());
   const R = rim.length;
   if (R < 3) throw new Error('degenerate silhouette');
   const Crim = new THREE.Vector3(); rim.forEach((p) => Crim.add(p)); Crim.multiplyScalar(1 / R);
-  const size = new THREE.Vector3(); new THREE.Box3().setFromPoints(rim).getSize(size);
-  const headDepth = 1.4 * Math.max(size.x, size.y);           // how far back the crown sits
-  const backDir = new THREE.Vector3(0, 0.18, -1).normalize(); // lean the crown slightly up/back
-  const RINGS = 10;
+  const bb = new THREE.Box3().setFromPoints(rim); const size = new THREE.Vector3(); bb.getSize(size);
+  const faceSize = Math.max(size.x, size.y), halfW = size.x / 2, halfH = size.y / 2;
 
-  const pos = [];
-  const pushRing = (arr) => arr.forEach((p) => pos.push(p.x, p.y, p.z));
-  pushRing(rim); // ring 0 = rim
-  for (let k = 1; k < RINGS; k++){
-    const t = k / RINGS, c = Math.cos(t * Math.PI / 2), s = Math.sin(t * Math.PI / 2);
-    pushRing(rim.map((rp) => Crim.clone()
-      .add(rp.clone().sub(Crim).multiplyScalar(c))       // shrink rim radius toward the axis…
-      .add(backDir.clone().multiplyScalar(headDepth * s)))); // …while moving back to the crown
+  // geometry accumulator
+  const V = [], I = [];
+  const addV = (p) => { V.push(p.x, p.y, p.z); return V.length / 3 - 1; };
+  const tri = (a, b, c) => { I.push(a, b, c); };
+  const quad = (a, b, c, d) => { I.push(a, c, b, b, c, d); };
+
+  // ---------- CRANIUM ----------
+  const depth = HEAD.depth * faceSize;
+  const backDir = new THREE.Vector3(0, HEAD.crownLean, -1).normalize();
+  const profile = (t) => Math.cos(t * Math.PI / 2) * (1 + HEAD.bulge * Math.sin(t * Math.PI)); // rim→pole, bulged
+  const rings = [rim.map((p) => addV(p))]; // ring 0 = rim
+  for (let k = 1; k < HEAD.rings; k++){
+    const t = k / HEAD.rings, rad = profile(t), back = backDir.clone().multiplyScalar(depth * Math.sin(t * Math.PI / 2));
+    rings.push(rim.map((rp) => addV(Crim.clone().add(rp.clone().sub(Crim).multiplyScalar(rad)).add(back))));
   }
-  const pole = Crim.clone().add(backDir.clone().multiplyScalar(headDepth));
-  pos.push(pole.x, pole.y, pole.z);
-  const poleIdx = RINGS * R;
+  const pole = addV(Crim.clone().add(backDir.clone().multiplyScalar(depth)));
+  for (let r = 0; r < HEAD.rings - 1; r++)
+    for (let i = 0; i < R; i++) quad(rings[r][i], rings[r][(i+1)%R], rings[r+1][i], rings[r+1][(i+1)%R]);
+  for (let i = 0; i < R; i++) tri(rings[HEAD.rings-1][i], pole, rings[HEAD.rings-1][(i+1)%R]);
 
-  const index = [], at = (ring, i) => ring * R + (i % R);
-  for (let ring = 0; ring < RINGS - 1; ring++){
-    for (let i = 0; i < R; i++){
-      const a = at(ring, i), b = at(ring, i + 1), c = at(ring + 1, i), d = at(ring + 1, i + 1);
-      index.push(a, c, b, b, c, d);
+  // ---------- EARS (a small outward dome on each side, at ~ear height) ----------
+  if (HEAD.ears){
+    const earY = Crim.y - halfH * 0.05, earZ = Crim.z - depth * 0.12;
+    const h = HEAD.earH * faceSize, d = HEAD.earD * faceSize, th = HEAD.earThick * faceSize;
+    for (const sign of [-1, 1]){
+      const cx = Crim.x + sign * halfW * HEAD.earLat, SEG = HEAD.earSeg, LAT = Math.ceil(SEG/2);
+      const grid = [];
+      for (let a = 0; a <= LAT; a++){
+        const u = (a / LAT) * (Math.PI / 2), row = [];
+        for (let b = 0; b < SEG; b++){
+          const v = (b / SEG) * 2 * Math.PI;
+          row.push(addV(new THREE.Vector3(cx + sign*th*Math.cos(u), earY + h*Math.sin(u)*Math.cos(v), earZ + d*Math.sin(u)*Math.sin(v))));
+        }
+        grid.push(row);
+      }
+      for (let a = 0; a < LAT; a++) for (let b = 0; b < SEG; b++) quad(grid[a][b], grid[a][(b+1)%SEG], grid[a+1][b], grid[a+1][(b+1)%SEG]);
+      const tip = addV(new THREE.Vector3(cx + sign*th, earY, earZ));
+      for (let b = 0; b < SEG; b++) tri(grid[0][b], tip, grid[0][(b+1)%SEG]);
     }
   }
-  for (let i = 0; i < R; i++) index.push(at(RINGS - 1, i), poleIdx, at(RINGS - 1, i + 1));
+
+  // ---------- NECK stub (tapered tube under the chin, capped at the bottom) ----------
+  if (HEAD.neck){
+    const topY = bb.min.y + halfH * 0.10, len = HEAD.neckLen * faceSize;
+    const cx = Crim.x, cz = Crim.z - depth * 0.05, SEG = HEAD.neckSeg, L = HEAD.neckRings;
+    const nr = [];
+    for (let l = 0; l <= L; l++){
+      const tt = l / L, y = topY - tt * len, rr = THREE.MathUtils.lerp(HEAD.neckTopR, HEAD.neckBotR, tt) * faceSize, row = [];
+      for (let b = 0; b < SEG; b++){ const v = (b / SEG) * 2 * Math.PI; row.push(addV(new THREE.Vector3(cx + Math.cos(v)*rr, y, cz + Math.sin(v)*rr*0.8))); }
+      nr.push(row);
+    }
+    for (let l = 0; l < L; l++) for (let b = 0; b < SEG; b++) quad(nr[l][b], nr[l][(b+1)%SEG], nr[l+1][b], nr[l+1][(b+1)%SEG]);
+    const cbot = addV(new THREE.Vector3(cx, topY - len, cz));
+    for (let b = 0; b < SEG; b++) tri(nr[L][b], nr[L][(b+1)%SEG], cbot);
+  }
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((pos.length / 3) * 2), 2)); // unused; keeps exporters happy
-  geo.setIndex(index);
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(V), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((V.length / 3) * 2), 2)); // unused; keeps exporters happy
+  geo.setIndex(I);
   return geo;
 }
 
