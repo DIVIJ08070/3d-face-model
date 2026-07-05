@@ -25,10 +25,12 @@ python3 -m http.server 8000
 ## 🧭 How to use
 1. **Start Scan** → keep your face in the oval (front), then slowly turn **left**,
    then **right** — the angle gauge turns **green** when you're in the capture zone.
-2. **Build 3D** → rotate / zoom the model; toggle wireframe, texture, auto-rotate,
-   reset view, or change the background.
-3. **Download** as **GLB** (recommended — texture embedded), **OBJ**, **STL**
-   (for 3D printing), or a **PNG** snapshot.
+2. **Build 3D** → you get a **full closed head** (textured face on the front, a
+   skin-toned skull shell behind, colour sampled from your photo). Rotate / zoom;
+   toggle **Full head / Face-only**, wireframe, texture, auto-rotate, reset view,
+   or change the background.
+3. **Download** as **GLB** (recommended — full head with texture embedded),
+   **OBJ**, **STL** (full head, for 3D printing), or a **PNG** snapshot.
 
 ## 🛠 Tech
 Vanilla JS · [Three.js](https://threejs.org) · MediaPipe Face Mesh (468 facial

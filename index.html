@@ -310,6 +310,7 @@ button{font-family:inherit; font-size:15px; cursor:pointer}
   <div class="viewer-stage">
     <canvas id="viewer-canvas"></canvas>
     <div class="toolbar">
+      <button class="tbtn on" id="t-head">Full head <span>on</span></button>
       <button class="tbtn" id="t-wire">Wireframe <span>off</span></button>
       <button class="tbtn on" id="t-tex">Texture <span>on</span></button>
       <button class="tbtn" id="t-rot">Auto-rotate <span>off</span></button>
@@ -407,7 +408,8 @@ let latest = { landmarks: null, yaw: 0, box: null, multi: false, luma: 255 };
 let lastFaceAt = 0, hintShown = false;
 let holdStart = 0, countdownActive = false, countdownEndsAt = 0;
 // viewer resources (disposed on reset)
-let renderer, scene, camera, controls, mesh, geometry, material, texture, rafViewer = 0, onResize = null;
+let renderer, scene, camera, controls, head, faceObj, backObj,
+    faceGeo, backGeo, faceMat, skinMat, texture, rafViewer = 0, onResize = null;
 let procTimer = 0;
 
 /* =====================================================================
@@ -826,29 +828,25 @@ function blendDepth(front, left, right){
 function estimateYawOf(lm){ const nose=lm[1], a=lm[234], b=lm[454]; const span=(b.x-a.x)||1e-6; return ((nose.x-a.x)/span - 0.5) * 2 * CONFIG.yawScale; }
 function deg2rad(d){ return d * Math.PI / 180; }
 
-function buildMesh(){
+// Build the FACE surface (front landmarks → Delaunay patch) in raw model space
+// (not yet centred/scaled — that happens once for the whole head). Returns the
+// geometry plus the vertex list and the convex-hull ring (the face silhouette).
+function buildFaceGeometry(){
   const front = captures.front;
   if (!front || front.landmarks.length < CONFIG.LM_COUNT) throw new Error('Front capture is missing landmarks.');
   const aspect = front.size.w / front.size.h;
   const blended = blendDepth(front.landmarks, captures.left?.landmarks, captures.right?.landmarks);
-
-  // --- vertex positions ---
   const verts = blended.map((p) => toModelPoint(p, aspect));
 
-  // --- triangulation: Delaunay over the FRONT 2D landmarks ---------------
-  // The frontal face is near-planar, so a 2D Delaunay triangulation of the
-  // landmark points yields a clean, printable mesh without needing MediaPipe's
-  // ~2.6k-edge canonical TESSELATION list embedded. (Swappable if desired.)
+  // 2D Delaunay of the front landmarks → face triangles + ordered hull (silhouette).
   const pts2d = front.landmarks.map((p) => [p.x * aspect, p.y]);
   const del = Delaunator.from(pts2d);
   const rawTris = del.triangles;
+  const hull = Array.from(del.hull); // ordered boundary vertex indices
 
-  // Drop hull-spanning sliver triangles (edge much longer than typical) so the
-  // silhouette/eyes/mouth openings aren't bridged by stretched faces.
+  // Drop hull-spanning sliver triangles so eyes/mouth/silhouette aren't bridged.
   const edgeLens = [];
-  for (let i = 0; i < rawTris.length; i += 3){
-    edgeLens.push(triMaxEdge(pts2d, rawTris[i], rawTris[i+1], rawTris[i+2]));
-  }
+  for (let i = 0; i < rawTris.length; i += 3) edgeLens.push(triMaxEdge(pts2d, rawTris[i], rawTris[i+1], rawTris[i+2]));
   const median = edgeLens.slice().sort((a,b) => a-b)[Math.floor(edgeLens.length/2)] || 1;
   const maxEdge = median * 2.4;
   const index = [];
@@ -856,29 +854,109 @@ function buildMesh(){
     if (edgeLens[t] <= maxEdge) index.push(rawTris[i], rawTris[i+1], rawTris[i+2]);
   }
 
-  // --- build BufferGeometry ---
   const geo = new THREE.BufferGeometry();
-  const posArr = new Float32Array(verts.length * 3);
-  const uvArr  = new Float32Array(verts.length * 2);
+  const posArr = new Float32Array(verts.length * 3), uvArr = new Float32Array(verts.length * 2);
   for (let i = 0; i < verts.length; i++){
     posArr[i*3] = verts[i].x; posArr[i*3+1] = verts[i].y; posArr[i*3+2] = verts[i].z;
-    // UVs from front 2D landmarks. Default texture.flipY=true ⇒ v = 1 - y.
-    uvArr[i*2] = front.landmarks[i].x; uvArr[i*2+1] = 1 - front.landmarks[i].y;
+    uvArr[i*2] = front.landmarks[i].x; uvArr[i*2+1] = 1 - front.landmarks[i].y; // flipY default ⇒ v=1-y
   }
   geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
   geo.setIndex(index);
+  return { geo, verts, hull };
+}
 
-  // center at origin and scale to a sensible size (max dim ≈ 2 units)
-  geo.computeBoundingBox();
-  const c = new THREE.Vector3(); geo.boundingBox.getCenter(c);
-  geo.translate(-c.x, -c.y, -c.z);
-  const size = new THREE.Vector3(); geo.boundingBox.getSize(size);
-  const s = 2 / Math.max(size.x, size.y, size.z);
-  geo.scale(s, s, s);
-  geo.computeVertexNormals(); // smooth normals
+// Loft a SKULL shell backward from the face silhouette so the result is a full
+// closed head, not a floating mask. Ring 0 is the exact face-hull rim (so the two
+// meet seamlessly); successive rings sweep along a quarter-ellipse to a single
+// back-of-head pole — the shell only ever extends backward, so it can never poke
+// through the front of the face. Returns a BufferGeometry (solid, untextured).
+function buildSkullGeometry(faceVerts, hull){
+  const rim = hull.map((h) => faceVerts[h].clone());
+  const R = rim.length;
+  if (R < 3) throw new Error('degenerate silhouette');
+  const Crim = new THREE.Vector3(); rim.forEach((p) => Crim.add(p)); Crim.multiplyScalar(1 / R);
+  const size = new THREE.Vector3(); new THREE.Box3().setFromPoints(rim).getSize(size);
+  const headDepth = 1.4 * Math.max(size.x, size.y);           // how far back the crown sits
+  const backDir = new THREE.Vector3(0, 0.18, -1).normalize(); // lean the crown slightly up/back
+  const RINGS = 10;
 
+  const pos = [];
+  const pushRing = (arr) => arr.forEach((p) => pos.push(p.x, p.y, p.z));
+  pushRing(rim); // ring 0 = rim
+  for (let k = 1; k < RINGS; k++){
+    const t = k / RINGS, c = Math.cos(t * Math.PI / 2), s = Math.sin(t * Math.PI / 2);
+    pushRing(rim.map((rp) => Crim.clone()
+      .add(rp.clone().sub(Crim).multiplyScalar(c))       // shrink rim radius toward the axis…
+      .add(backDir.clone().multiplyScalar(headDepth * s)))); // …while moving back to the crown
+  }
+  const pole = Crim.clone().add(backDir.clone().multiplyScalar(headDepth));
+  pos.push(pole.x, pole.y, pole.z);
+  const poleIdx = RINGS * R;
+
+  const index = [], at = (ring, i) => ring * R + (i % R);
+  for (let ring = 0; ring < RINGS - 1; ring++){
+    for (let i = 0; i < R; i++){
+      const a = at(ring, i), b = at(ring, i + 1), c = at(ring + 1, i), d = at(ring + 1, i + 1);
+      index.push(a, c, b, b, c, d);
+    }
+  }
+  for (let i = 0; i < R; i++) index.push(at(RINGS - 1, i), poleIdx, at(RINGS - 1, i + 1));
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array((pos.length / 3) * 2), 2)); // unused; keeps exporters happy
+  geo.setIndex(index);
   return geo;
+}
+
+// Average skin colour from the front photo (forehead + cheeks) so the skull
+// shell matches the person instead of a generic tone.
+function sampleSkinColor(front){
+  try {
+    const cv = front.image, ctx = cv.getContext('2d');
+    const idx = [10, 234, 454, 50, 280, 151];
+    let r = 0, g = 0, b = 0, n = 0;
+    for (const i of idx){
+      const p = front.landmarks[i]; if (!p) continue;
+      const x = Math.min(cv.width - 1, Math.max(0, Math.round(p.x * cv.width)));
+      const y = Math.min(cv.height - 1, Math.max(0, Math.round(p.y * cv.height)));
+      const d = ctx.getImageData(x, y, 1, 1).data; r += d[0]; g += d[1]; b += d[2]; n++;
+    }
+    return n ? new THREE.Color(`rgb(${Math.round(r/n)},${Math.round(g/n)},${Math.round(b/n)})`) : new THREE.Color(0xd8b3a0);
+  } catch(e){ return new THREE.Color(0xd8b3a0); }
+}
+
+// Assemble the full head: textured face + skin-toned skull, centred & scaled by
+// ONE shared transform so they stay aligned. Returns a Group + the refs the
+// viewer/toggles/export use. Skull failure degrades gracefully to face-only.
+function buildHead(){
+  const front = captures.front;
+  const face = buildFaceGeometry();
+  let back = null;
+  try { back = buildSkullGeometry(face.verts, face.hull); } catch(e){ console.warn('skull shell skipped:', e.message); }
+
+  // centre + uniformly scale BOTH geometries by the same transform (max dim ≈ 2)
+  const box = new THREE.Box3().setFromBufferAttribute(face.geo.getAttribute('position'));
+  if (back) box.union(new THREE.Box3().setFromBufferAttribute(back.getAttribute('position')));
+  const c = new THREE.Vector3(); box.getCenter(c);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const sc = 2 / Math.max(size.x, size.y, size.z);
+  for (const g of [face.geo, back].filter(Boolean)){ g.translate(-c.x, -c.y, -c.z); g.scale(sc, sc, sc); g.computeVertexNormals(); }
+
+  const tex = applyTexture(front.image);
+  const fMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.72, metalness: 0.0, side: THREE.DoubleSide });
+  const sMat = new THREE.MeshStandardMaterial({ color: sampleSkinColor(front), roughness: 0.92, metalness: 0.0, side: THREE.DoubleSide });
+  const fMesh = new THREE.Mesh(face.geo, fMat);
+  const bMesh = back ? new THREE.Mesh(back, sMat) : null;
+  const group = new THREE.Group();
+  if (bMesh) group.add(bMesh);   // skull first (drawn behind)
+  group.add(fMesh);
+
+  const tris = ((face.geo.getIndex().count + (back ? back.getIndex().count : 0)) / 3) | 0;
+  const verts = face.geo.getAttribute('position').count + (back ? back.getAttribute('position').count : 0);
+  return { group, faceMesh: fMesh, backMesh: bMesh, faceGeo: face.geo, backGeo: back,
+           faceMat: fMat, skinMat: sMat, texture: tex, tris, verts };
 }
 function triMaxEdge(pts, a, b, c){
   const d = (i,j) => Math.hypot(pts[i][0]-pts[j][0], pts[i][1]-pts[j][1]);
@@ -896,7 +974,7 @@ function applyTexture(frontCanvas){
 /* =====================================================================
  *  3D VIEWER
  * ===================================================================== */
-function initViewer(geo){
+function initViewer(build){
   const canvas = $('#viewer-canvas');
   const stage = canvas.parentElement;
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true, alpha: false });
@@ -915,13 +993,11 @@ function initViewer(geo){
   const rim = new THREE.DirectionalLight(0xffffff, 1.2); rim.position.set(0, 2, -3);
   scene.add(key, fill, rim, new THREE.AmbientLight(0xffffff, 0.5), new THREE.HemisphereLight(0xdfe9ff, 0x0b0e14, 0.5));
 
-  texture = applyTexture(captures.front.image);
-  material = new THREE.MeshStandardMaterial({
-    map: texture, roughness: 0.72, metalness: 0.0, side: THREE.DoubleSide,
-  });
-  geometry = geo;
-  mesh = new THREE.Mesh(geometry, material);
-  scene.add(mesh);
+  // adopt the pre-built head (face + skull) and its material refs
+  head = build.group; faceObj = build.faceMesh; backObj = build.backMesh;
+  faceGeo = build.faceGeo; backGeo = build.backGeo;
+  faceMat = build.faceMat; skinMat = build.skinMat; texture = build.texture;
+  scene.add(head);
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true; controls.dampingFactor = 0.08;
@@ -936,10 +1012,7 @@ function initViewer(geo){
   window.addEventListener('resize', onResize); onResize();
   controls.saveState(); // so "Reset view" returns here
 
-  const stats = $('#stats');
-  const tris = (geo.getIndex().count / 3) | 0;
-  const verts = geo.getAttribute('position').count;
-  stats.textContent = `▲ ${tris.toLocaleString()} tris · ● ${verts.toLocaleString()} verts`;
+  $('#stats').textContent = `▲ ${build.tris.toLocaleString()} tris · ● ${build.verts.toLocaleString()} verts`;
 
   (function loop(){ rafViewer = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
 }
@@ -947,26 +1020,30 @@ function initViewer(geo){
 /* Sync the toolbar buttons to the freshly-built material/controls/scene state,
  * so a second scan doesn't leave stale 'on/off' labels inverted from reality. */
 function resetToolbarUI(){
-  const set = (el, on, label) => { el.classList.toggle('on', on); el.querySelector('span').textContent = label; };
+  const set = (el, on, label) => { if (el){ el.classList.toggle('on', on); el.querySelector('span').textContent = label; } };
+  set($('#t-head'), true,  'on');  // fresh: skull shell visible (full head)
   set($('#t-wire'), false, 'off'); // fresh material: wireframe off
   set($('#t-tex'),  true,  'on');  // fresh material: textured
   set($('#t-rot'),  false, 'off'); // fresh controls: auto-rotate off
-  $('#t-bg').value = '#0b0e14';     // fresh scene.background
+  const bg = $('#t-bg'); if (bg) bg.value = '#0b0e14'; // fresh scene.background
 }
 
 /* viewer toggles */
 function wireViewerControls(){
   resetToolbarUI();
-  const tw = $('#t-wire'), tt = $('#t-tex'), tr = $('#t-rot');
-  tw.onclick = () => { material.wireframe = !material.wireframe; tw.classList.toggle('on', material.wireframe); tw.querySelector('span').textContent = material.wireframe ? 'on' : 'off'; };
+  const th = $('#t-head'), tw = $('#t-wire'), tt = $('#t-tex'), tr = $('#t-rot');
+  const label = (el, on) => { el.classList.toggle('on', on); el.querySelector('span').textContent = on ? 'on' : 'off'; };
+  // Full head vs face-only: show/hide the skull shell (disabled if none was built)
+  if (!backObj){ th.setAttribute('disabled', ''); } else { th.removeAttribute('disabled'); }
+  th.onclick = () => { if (!backObj) return; backObj.visible = !backObj.visible; label(th, backObj.visible); };
+  tw.onclick = () => { const w = !faceMat.wireframe; faceMat.wireframe = w; if (skinMat) skinMat.wireframe = w; label(tw, w); };
   tt.onclick = () => {
-    const on = !material.map;
-    material.map = on ? texture : null;
-    material.color.set(on ? 0xffffff : 0xd8b3a0); // fallback skin tone
-    material.needsUpdate = true;
-    tt.classList.toggle('on', on); tt.querySelector('span').textContent = on ? 'on' : 'off';
+    const on = !faceMat.map;
+    faceMat.map = on ? texture : null;
+    faceMat.color.set(on ? 0xffffff : 0xd8b3a0); // fallback skin tone on the face
+    faceMat.needsUpdate = true; label(tt, on);
   };
-  tr.onclick = () => { controls.autoRotate = !controls.autoRotate; tr.classList.toggle('on', controls.autoRotate); tr.querySelector('span').textContent = controls.autoRotate ? 'on' : 'off'; };
+  tr.onclick = () => { controls.autoRotate = !controls.autoRotate; label(tr, controls.autoRotate); };
   $('#t-reset').onclick = () => controls.reset();
   $('#t-bg').oninput = (e) => scene.background.set(e.target.value);
 }
@@ -984,28 +1061,28 @@ function download(blob, filename){
 // viewer's current toggle state — so a GLB is never accidentally exported
 // untextured just because the user toggled "Texture off" in the viewer.
 function forceTextured(){
-  if (!material) return () => {};
-  const prevMap = material.map, prevColor = material.color.getHex();
-  material.map = texture; material.color.set(0xffffff); material.needsUpdate = true;
-  return () => { material.map = prevMap; material.color.setHex(prevColor); material.needsUpdate = true; };
+  if (!faceMat) return () => {};
+  const prevMap = faceMat.map, prevColor = faceMat.color.getHex();
+  faceMat.map = texture; faceMat.color.set(0xffffff); faceMat.needsUpdate = true;
+  return () => { faceMat.map = prevMap; faceMat.color.setHex(prevColor); faceMat.needsUpdate = true; };
 }
 function exportGLB(){
   const restore = forceTextured();
-  new GLTFExporter().parse(mesh,
+  new GLTFExporter().parse(head, // the whole head Group (face + skull), texture embedded
     (result) => { restore(); download(new Blob([result], { type: 'model/gltf-binary' }), 'my-face-scan.glb'); toast('Downloaded my-face-scan.glb', 'good'); },
     (err) => { restore(); toast('GLB export failed', 'bad'); console.error(err); },
     { binary: true });
 }
 function exportOBJ(){
-  try { const txt = new OBJExporter().parse(mesh);
+  try { const txt = new OBJExporter().parse(head);
     download(new Blob([txt], { type: 'text/plain' }), 'my-face-scan.obj');
     toast('Downloaded my-face-scan.obj (texture: see the GLB)', 'good');
   } catch(e){ toast('OBJ export failed', 'bad'); console.error(e); }
 }
 function exportSTL(){
-  try { const data = new STLExporter().parse(mesh, { binary: true });
+  try { const data = new STLExporter().parse(head, { binary: true });
     download(new Blob([data], { type: 'model/stl' }), 'my-face-scan.stl');
-    toast('Downloaded my-face-scan.stl (untextured — for 3D printing)', 'good');
+    toast('Downloaded my-face-scan.stl (full head, untextured — for 3D printing)', 'good');
   } catch(e){ toast('STL export failed', 'bad'); console.error(e); }
 }
 function exportPNG(){
@@ -1055,7 +1132,7 @@ function handleInitError(err){
  * ===================================================================== */
 function startProcessing(){
   showScreen('processing');
-  const msgs = ['Detecting landmarks…', 'Blending depth from side captures…', 'Triangulating mesh…', 'Baking texture…'];
+  const msgs = ['Detecting landmarks…', 'Blending depth from side captures…', 'Triangulating the face…', 'Sculpting the head…', 'Baking texture…'];
   let i = 0; $('#proc-status').textContent = msgs[0];
   procTimer = setInterval(() => { i = (i + 1) % msgs.length; $('#proc-status').textContent = msgs[i]; }, 900);
 
@@ -1063,12 +1140,12 @@ function startProcessing(){
   setTimeout(() => {
     try {
       disposeViewer(); // in case of a re-run
-      const geo = buildMesh();
+      const build = buildHead();
       // Show the result screen BEFORE initViewer so the canvas stage has real
       // layout dimensions (a hidden display:none stage reports 0×0, which would
       // size the WebGL canvas to 0 until the next window resize).
       showScreen('result');
-      initViewer(geo);
+      initViewer(build);
       wireViewerControls();
       clearInterval(procTimer);
     } catch(err){
@@ -1086,12 +1163,15 @@ function disposeViewer(){
   cancelAnimationFrame(rafViewer); rafViewer = 0;
   if (onResize){ window.removeEventListener('resize', onResize); onResize = null; }
   if (controls) controls.dispose();
-  if (geometry) geometry.dispose();
-  if (material) material.dispose();
+  if (faceGeo) faceGeo.dispose();
+  if (backGeo) backGeo.dispose();
+  if (faceMat) faceMat.dispose();
+  if (skinMat) skinMat.dispose();
   if (texture) texture.dispose();
-  if (mesh && scene) scene.remove(mesh);
+  if (head && scene) scene.remove(head);
   if (renderer) renderer.dispose();
-  renderer = scene = camera = controls = mesh = geometry = material = texture = null;
+  renderer = scene = camera = controls = head = faceObj = backObj =
+    faceGeo = backGeo = faceMat = skinMat = texture = null;
 }
 function resetAll(){
   disposeViewer();
@@ -1143,16 +1223,17 @@ if (!window.isSecureContext && !['localhost', '127.0.0.1'].includes(location.hos
 // paths with synthetic landmark data (a fake webcam can't provide a real face).
 window.__faceforge = {
   CONFIG, captures, state: () => latest,
-  buildMesh, initViewer, wireViewerControls, startProcessing, sideInZone, forceTextured,
-  get mesh(){ return mesh; },
-  get material(){ return material; },
+  buildHead, initViewer, wireViewerControls, startProcessing, sideInZone, forceTextured,
+  get head(){ return head; },
+  get backMesh(){ return backObj; },
+  get faceMat(){ return faceMat; },
   get texture(){ return texture; },
   qaExportSizes: () => new Promise((resolve) => {
     const res = {};
-    try { res.obj = new OBJExporter().parse(mesh).length; } catch(e){ res.obj = 'ERR:' + e.message; }
-    try { const s = new STLExporter().parse(mesh, { binary: true }); res.stl = s.byteLength ?? s.length; }
+    try { res.obj = new OBJExporter().parse(head).length; } catch(e){ res.obj = 'ERR:' + e.message; }
+    try { const s = new STLExporter().parse(head, { binary: true }); res.stl = s.byteLength ?? s.length; }
     catch(e){ res.stl = 'ERR:' + e.message; }
-    new GLTFExporter().parse(mesh,
+    new GLTFExporter().parse(head,
       (r) => { res.glb = r.byteLength; resolve(res); },
       () => { res.glb = 'ERR'; resolve(res); }, { binary: true });
   }),
